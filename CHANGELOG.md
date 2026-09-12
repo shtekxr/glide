@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.16](https://github.com/tmandry/glide/compare/v0.2.15...v0.2.16) (2026-09-12)
+
+
+### Features
+
+* Add toggle_orientation to flip a container between rows and columns ([3a92f97](https://github.com/tmandry/glide/commit/3a92f97d2b20167b26f9274cdd6a90ca504def53))
+* Add toggle_orientation to flip a container between rows and columns ([895a547](https://github.com/tmandry/glide/commit/895a5478807c117660ea06cea9165d2fd7f45894))
+
 ## [0.2.15](https://github.com/tmandry/glide/compare/v0.2.14...v0.2.15) (2026-08-09)
 
 When a window is floated, Glide now remembers the original size and position of the window. This release brings a ton of reliability improvements for when windows move between spaces and screens, focus changes, and windows are resized or floated. It also improves compatibility with certain apps.
