@@ -570,6 +570,7 @@ impl LayoutManager {
                 let floating_active = self.active_floating_windows.reset_app(space, pid);
                 let mut add_floating = Vec::new();
                 let mut new_windows = Vec::new();
+                let mut new_bsp_windows = Vec::new();
                 let tree_windows = windows
                     .iter()
                     .map(|(wid, _info)| *wid)
@@ -592,6 +593,9 @@ impl LayoutManager {
                                 if self.tree.is_scroll_layout(layout) {
                                     new_windows.push(*wid);
                                     false
+                                } else if self.split_mode == SplitMode::Bsp {
+                                    new_bsp_windows.push(*wid);
+                                    false
                                 } else {
                                     true
                                 }
@@ -602,6 +606,10 @@ impl LayoutManager {
                 self.tree.set_windows_for_app(self.layout(space), pid, tree_windows);
                 for wid in new_windows {
                     self.add_scroll_window(layout, wid);
+                }
+                for wid in new_bsp_windows {
+                    let node = self.add_tree_window(space, layout, wid);
+                    self.tree.select(node);
                 }
                 for wid in add_floating {
                     self.add_floating_window(wid, Some(space));
@@ -628,7 +636,8 @@ impl LayoutManager {
                         if self.tree.is_scroll_layout(layout) {
                             self.add_scroll_window(layout, wid);
                         } else {
-                            self.add_tree_window(space, layout, wid);
+                            let node = self.add_tree_window(space, layout, wid);
+                            self.tree.select(node);
                         }
                     }
                     WindowClass::Untracked => (),
@@ -1242,7 +1251,10 @@ impl LayoutManager {
     }
 
     fn add_tree_window(&mut self, space: SpaceId, layout: LayoutId, wid: WindowId) -> NodeId {
-        let selection = self.tree.selection(layout);
+        let target = self
+            .focused_window
+            .and_then(|f| self.tree.window_node(layout, f))
+            .unwrap_or_else(|| self.tree.selection(layout));
         if self.split_mode == SplitMode::Bsp {
             let screen_size = self
                 .layout_mapping
@@ -1250,9 +1262,9 @@ impl LayoutManager {
                 .map(|m| m.active_size())
                 .unwrap_or_else(|| CGSize::new(1920.0, 1080.0));
             let screen = CGRect::new(CGPoint::ZERO, screen_size);
-            self.tree.add_window_bsp(layout, selection, wid, screen, &self.config)
+            self.tree.add_window_bsp(layout, target, wid, screen, &self.config)
         } else {
-            self.tree.add_window_after(layout, selection, wid)
+            self.tree.add_window_after(layout, target, wid)
         }
     }
 
@@ -3152,5 +3164,58 @@ mod tests {
         assert_eq!(mgr.split_mode, SplitMode::Manual);
         _ = mgr.handle_command(Some(space), &[space], ToggleSplitMode);
         assert_eq!(mgr.split_mode, SplitMode::Bsp);
+    }
+
+    #[test]
+    fn bsp_mode_windows_on_screen_updated() {
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        mgr.split_mode = SplitMode::Bsp;
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let screen = rect(0, 0, 1000, 1000);
+
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+
+        // 1st window appears
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 1)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![(WindowId::new(pid, 1), rect(0, 0, 1000, 1000))]
+        );
+
+        // 2nd window appears
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 2)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 1000)),
+            ]
+        );
+
+        // 3rd window appears
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 3)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 1000)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 500)),
+                (WindowId::new(pid, 3), rect(500, 500, 500, 500)),
+            ]
+        );
+
+        // Focus 1st window and 4th window appears
+        _ = mgr.handle_event(WindowFocused(vec![space], WindowId::new(pid, 1)));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 4)));
+        assert_eq!(
+            mgr.layout_sorted(space, screen),
+            vec![
+                (WindowId::new(pid, 1), rect(0, 0, 500, 500)),
+                (WindowId::new(pid, 2), rect(500, 0, 500, 500)),
+                (WindowId::new(pid, 3), rect(500, 500, 500, 500)),
+                (WindowId::new(pid, 4), rect(0, 500, 500, 500)),
+            ]
+        );
     }
 }

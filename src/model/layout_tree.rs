@@ -230,16 +230,32 @@ impl LayoutTree {
     pub fn add_window_bsp(
         &mut self,
         layout: LayoutId,
-        target: NodeId,
+        mut target: NodeId,
         wid: WindowId,
         screen: CGRect,
         config: &Config,
     ) -> NodeId {
         let root = self.root(layout);
-        if target == root
-            || self.window_at(target).is_none()
-            || target.ancestors(self.map()).last() != Some(root)
-        {
+        if target.ancestors(self.map()).last() != Some(root) {
+            target = root;
+        }
+
+        // If target is not a window (e.g. root or container), find a window to split.
+        if self.window_at(target).is_none() {
+            if let Some(w) =
+                target.traverse_postorder(self.map()).find(|n| self.window_at(*n).is_some())
+            {
+                target = w;
+            } else if target != root {
+                if let Some(w) =
+                    root.traverse_postorder(self.map()).find(|n| self.window_at(*n).is_some())
+                {
+                    target = w;
+                }
+            }
+        }
+
+        if target == root || self.window_at(target).is_none() {
             return self.add_window_under(layout, root, wid);
         }
 
