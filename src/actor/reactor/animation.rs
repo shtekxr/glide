@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::config::{AnimationConfig, AnimationCurve};
+use crate::sys::geometry::SameAs;
 use crate::sys::timer::Timer;
 
 pub type Sender = mpsc::UnboundedSender<Message>;
@@ -63,13 +64,7 @@ impl AnimatedWindow {
         }
 
         let t = f64::from(frame) / f64::from(total_frames);
-        let mut rect = get_frame(self.start, self.finish, t, curve);
-        if self.is_focus || frame * 2 >= total_frames {
-            rect.size = self.finish.size;
-        } else {
-            rect.size = self.start.size;
-        }
-        rect
+        get_frame(self.start, self.finish, t, curve)
     }
 }
 
@@ -275,13 +270,9 @@ impl Animation {
     fn send_frame(&self, frame: u32) {
         let t = f64::from(frame) / f64::from(self.frames);
         for window in &self.windows {
-            let mut rect = get_frame(window.start, window.finish, t, self.curve);
-            // Don't animate size, too slow. Resize halfway through and again at
-            // the end, in case it got clipped during the animation.
-            let set_size = frame * 2 == self.frames || frame == self.frames;
-            if set_size {
-                rect.size = window.finish.size;
-            }
+            let rect = get_frame(window.start, window.finish, t, self.curve);
+            let size_changed = !window.start.size.same_as(window.finish.size);
+            let set_size = size_changed || frame == self.frames;
             _ = window.handle.send(Request::AnimationFrame {
                 wid: window.wid,
                 frame: rect,
@@ -341,8 +332,8 @@ fn get_frame(a: CGRect, b: CGRect, t: f64, curve: AnimationCurve) -> CGRect {
             y: blend(a.origin.y, b.origin.y, s),
         },
         size: CGSize {
-            width: blend(a.size.width, b.size.width, s),
-            height: blend(a.size.height, b.size.height, s),
+            width: blend(a.size.width, b.size.width, s).max(10.0),
+            height: blend(a.size.height, b.size.height, s).max(10.0),
         },
     }
 }
@@ -583,5 +574,38 @@ mod tests {
         assert_eq!(anim.frames, 10);
         assert_eq!(anim.interval, Duration::from_millis(20));
         assert_eq!(anim.curve, AnimationCurve::EaseOut);
+    }
+
+    #[test]
+    fn animating_window_with_size_change_interpolates_size_smoothly() {
+        let (tx, mut rx) = unbounded_channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let wid = WindowId::new(1, 1);
+        let first = animation(
+            &handle,
+            wid,
+            rect(10.0, 10.0, 100.0, 100.0),
+            rect(10.0, 10.0, 300.0, 200.0),
+        );
+
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(first));
+        _ = collect_requests(&mut rx);
+
+        // Advance 1 tick
+        manager.tick();
+        let requests = collect_requests(&mut rx);
+        assert_eq!(requests.len(), 1);
+        match &requests[0] {
+            Request::AnimationFrame {
+                wid: req_wid, frame, set_size, ..
+            } => {
+                assert_eq!(*req_wid, wid);
+                assert!(*set_size, "expected set_size to be true during resize animation");
+                assert!(frame.size.width > 100.0 && frame.size.width < 300.0);
+                assert!(frame.size.height > 100.0 && frame.size.height < 200.0);
+            }
+            _ => panic!("expected AnimationFrame with interpolated size"),
+        }
     }
 }
