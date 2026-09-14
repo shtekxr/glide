@@ -903,7 +903,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config_elastic.settings.animation.curve, AnimationCurve::EaseOutElastic);
+        assert_eq!(
+            config_elastic.settings.animation.curve,
+            AnimationCurve::EaseOutElastic
+        );
 
         let config_back = Config::parse(
             r#"
