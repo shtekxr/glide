@@ -644,9 +644,46 @@ impl LayoutManager {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
+                let found_space_and_layout =
+                    self.layout_mapping.iter().find_map(|(&space, mapping)| {
+                        let layout = mapping.active_layout();
+                        let root = self.tree.root(layout);
+                        if self.tree.visible_windows_under(root).contains(&wid) {
+                            Some((space, layout))
+                        } else {
+                            None
+                        }
+                    });
+
+                if self.focused_window == Some(wid) {
+                    self.focused_window = None;
+                }
                 self.tree.remove_window(wid);
                 self.floating_windows.remove(&wid);
                 self.floating_restore_frames.remove(&wid);
+                self.active_floating_windows.remove_window(wid);
+
+                let target_layout = found_space_and_layout.map(|(_, l)| l).or_else(|| {
+                    self.layout_mapping
+                        .values()
+                        .map(|m| m.active_layout())
+                        .find(|&l| !self.tree.visible_windows_under(self.tree.root(l)).is_empty())
+                });
+
+                if let Some(layout) = target_layout {
+                    let selection_node = self.tree.selection(layout);
+                    let focus_window = self.tree.window_at(selection_node).or_else(|| {
+                        self.tree.visible_windows_under(self.tree.root(layout)).first().copied()
+                    });
+                    if let Some(focus_wid) = focus_window {
+                        self.focused_window = Some(focus_wid);
+                        return EventResponse {
+                            frame_overrides: vec![],
+                            raise_windows: vec![focus_wid],
+                            focus_window: Some(focus_wid),
+                        };
+                    }
+                }
             }
             LayoutEvent::WindowFrameChanged { wid, frame } => {
                 if self.floating_windows.contains(&wid) {
@@ -1171,6 +1208,14 @@ impl ActiveFloatingWindows {
             && let Some(wids) = by_pid.get_mut(&wid.pid)
         {
             wids.remove(&wid);
+        }
+    }
+
+    fn remove_window(&mut self, wid: WindowId) {
+        for by_pid in self.by_space.values_mut() {
+            if let Some(wids) = by_pid.get_mut(&wid.pid) {
+                wids.remove(&wid);
+            }
         }
     }
 
@@ -3217,5 +3262,29 @@ mod tests {
                 (WindowId::new(pid, 4), rect(0, 500, 500, 500)),
             ]
         );
+    }
+
+    #[test]
+    fn window_removed_focuses_remaining_window() {
+        use LayoutEvent::*;
+        let mut mgr = LayoutManager::new_for_test();
+        let space = SpaceId::new(1);
+        let pid = 1;
+        let screen = rect(0, 0, 1000, 1000);
+
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 2)));
+
+        let win1 = WindowId::new(pid, 1);
+        let win2 = WindowId::new(pid, 2);
+
+        _ = mgr.handle_event(WindowFocused(vec![space], win2));
+        assert_eq!(mgr.focused_window, Some(win2));
+
+        // When win2 is closed/removed, win1 should be focused and raised
+        let res = mgr.handle_event(WindowRemoved(win2));
+        assert_eq!(res.focus_window, Some(win1));
+        assert_eq!(res.raise_windows, vec![win1]);
+        assert_eq!(mgr.focused_window, Some(win1));
     }
 }
