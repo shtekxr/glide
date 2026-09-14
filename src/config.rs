@@ -344,6 +344,10 @@ pub enum AnimationCurve {
     EaseOut,
     EaseIn,
     Linear,
+    #[serde(alias = "back")]
+    EaseOutBack,
+    #[serde(alias = "elastic")]
+    EaseOutElastic,
 }
 
 impl AnimationCurve {
@@ -367,6 +371,21 @@ impl AnimationCurve {
             Self::EaseOut => 1.0 - (1.0 - t).powi(3),
             Self::EaseIn => t.powi(3),
             Self::Linear => t,
+            Self::EaseOutBack => {
+                let c1 = 1.70158;
+                let c3 = c1 + 1.0;
+                1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+            }
+            Self::EaseOutElastic => {
+                if t <= 0.0 {
+                    0.0
+                } else if t >= 1.0 {
+                    1.0
+                } else {
+                    const C4: f64 = (2.0 * std::f64::consts::PI) / 3.0;
+                    2.0_f64.powf(-10.0 * t) * ((t * 10.0 - 0.75) * C4).sin() + 1.0
+                }
+            }
         }
     }
 }
@@ -864,10 +883,35 @@ mod tests {
             AnimationCurve::EaseOut,
             AnimationCurve::EaseIn,
             AnimationCurve::Linear,
+            AnimationCurve::EaseOutBack,
+            AnimationCurve::EaseOutElastic,
         ] {
             assert!((curve.ease(0.0) - 0.0).abs() < 1e-6);
             assert!((curve.ease(1.0) - 1.0).abs() < 1e-6);
-            assert!(curve.ease(0.5) >= 0.0 && curve.ease(0.5) <= 1.0);
         }
+
+        // EaseOutElastic overshoots > 1.0 around t = 0.15
+        assert!(AnimationCurve::EaseOutElastic.ease(0.15) > 1.2);
+    }
+
+    #[test]
+    fn animation_curve_aliases() {
+        let config_elastic = Config::parse(
+            r#"
+            [settings.animation]
+            curve = "elastic"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config_elastic.settings.animation.curve, AnimationCurve::EaseOutElastic);
+
+        let config_back = Config::parse(
+            r#"
+            [settings.animation]
+            curve = "back"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config_back.settings.animation.curve, AnimationCurve::EaseOutBack);
     }
 }
