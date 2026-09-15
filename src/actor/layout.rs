@@ -620,9 +620,45 @@ impl LayoutManager {
                 self.floating_restore_frames.retain(|wid, _| hash_set.contains(&wid.pid));
             }
             LayoutEvent::AppClosed(pid) => {
+                let found_space_and_layout =
+                    self.layout_mapping.iter().find_map(|(&space, mapping)| {
+                        let layout = mapping.active_layout();
+                        let root = self.tree.root(layout);
+                        if self.tree.visible_windows_under(root).iter().any(|w| w.pid == pid) {
+                            Some((space, layout))
+                        } else {
+                            None
+                        }
+                    });
+
+                if self.focused_window.map_or(false, |w| w.pid == pid) {
+                    self.focused_window = None;
+                }
                 self.tree.remove_windows_for_app(pid);
                 self.floating_windows.remove_all_for_pid(pid);
                 self.floating_restore_frames.retain(|wid, _| wid.pid != pid);
+
+                let target_layout = found_space_and_layout.map(|(_, l)| l).or_else(|| {
+                    self.layout_mapping
+                        .values()
+                        .map(|m| m.active_layout())
+                        .find(|&l| !self.tree.visible_windows_under(self.tree.root(l)).is_empty())
+                });
+
+                if let Some(layout) = target_layout {
+                    let selection_node = self.tree.selection(layout);
+                    let focus_window = self.tree.window_at(selection_node).or_else(|| {
+                        self.tree.visible_windows_under(self.tree.root(layout)).first().copied()
+                    });
+                    if let Some(focus_wid) = focus_window {
+                        self.focused_window = Some(focus_wid);
+                        return EventResponse {
+                            frame_overrides: vec![],
+                            raise_windows: vec![focus_wid],
+                            focus_window: Some(focus_wid),
+                        };
+                    }
+                }
             }
             LayoutEvent::WindowAdded(space, wid, info) => {
                 self.debug_tree(space);
@@ -655,6 +691,21 @@ impl LayoutManager {
                         }
                     });
 
+                let (before_frames, closed_frame) = if let Some((space, _)) = found_space_and_layout
+                {
+                    let screen_size = self
+                        .layout_mapping
+                        .get(&space)
+                        .map(|m| m.active_size())
+                        .unwrap_or_else(|| CGSize::new(1920.0, 1080.0));
+                    let screen = CGRect::new(CGPoint::ZERO, screen_size);
+                    let frames = self.calculate_layout(space, screen, &self.config);
+                    let closed = frames.iter().find(|(w, _)| *w == wid).map(|(_, f)| *f);
+                    (frames, closed)
+                } else {
+                    (vec![], None)
+                };
+
                 if self.focused_window == Some(wid) {
                     self.focused_window = None;
                 }
@@ -663,19 +714,75 @@ impl LayoutManager {
                 self.floating_restore_frames.remove(&wid);
                 self.active_floating_windows.remove_window(wid);
 
-                let target_layout = found_space_and_layout.map(|(_, l)| l).or_else(|| {
-                    self.layout_mapping
-                        .values()
-                        .map(|m| m.active_layout())
-                        .find(|&l| !self.tree.visible_windows_under(self.tree.root(l)).is_empty())
+                let target_space_and_layout = found_space_and_layout.or_else(|| {
+                    self.layout_mapping.iter().find_map(|(&space, mapping)| {
+                        let layout = mapping.active_layout();
+                        if !self.tree.visible_windows_under(self.tree.root(layout)).is_empty() {
+                            Some((space, layout))
+                        } else {
+                            None
+                        }
+                    })
                 });
 
-                if let Some(layout) = target_layout {
-                    let selection_node = self.tree.selection(layout);
-                    let focus_window = self.tree.window_at(selection_node).or_else(|| {
-                        self.tree.visible_windows_under(self.tree.root(layout)).first().copied()
-                    });
+                if let Some((space, layout)) = target_space_and_layout {
+                    let screen_size = self
+                        .layout_mapping
+                        .get(&space)
+                        .map(|m| m.active_size())
+                        .unwrap_or_else(|| CGSize::new(1920.0, 1080.0));
+                    let screen = CGRect::new(CGPoint::ZERO, screen_size);
+                    let after_frames = self.calculate_layout(space, screen, &self.config);
+
+                    // Find which window expanded to replace `wid`.
+                    let focus_window = if let Some(cf) = closed_frame {
+                        let selection_wid = self.tree.window_at(self.tree.selection(layout));
+                        let mut candidates: Vec<(WindowId, f64, f64, bool)> = after_frames
+                            .iter()
+                            .map(|(w, af)| {
+                                let before_area = before_frames
+                                    .iter()
+                                    .find(|(bw, _)| bw == w)
+                                    .map(|(_, bf)| bf.area())
+                                    .unwrap_or(0.0);
+                                let delta_area = (af.area() - before_area).max(0.0);
+                                let overlap = af.intersection(&cf).area();
+                                let is_selected = selection_wid == Some(*w);
+                                (*w, overlap, delta_area, is_selected)
+                            })
+                            .collect();
+
+                        candidates.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| {
+                                    b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                                .then_with(|| b.3.cmp(&a.3))
+                        });
+
+                        candidates
+                            .first()
+                            .filter(|c| c.1 > 0.001 || c.2 > 0.001)
+                            .map(|c| c.0)
+                            .or(selection_wid)
+                            .or_else(|| {
+                                self.tree
+                                    .visible_windows_under(self.tree.root(layout))
+                                    .first()
+                                    .copied()
+                            })
+                    } else {
+                        let selection_node = self.tree.selection(layout);
+                        self.tree.window_at(selection_node).or_else(|| {
+                            self.tree.visible_windows_under(self.tree.root(layout)).first().copied()
+                        })
+                    };
+
                     if let Some(focus_wid) = focus_window {
+                        if let Some(node) = self.tree.window_node(layout, focus_wid) {
+                            self.tree.select(node);
+                        }
                         self.focused_window = Some(focus_wid);
                         return EventResponse {
                             frame_overrides: vec![],
@@ -3286,5 +3393,36 @@ mod tests {
         assert_eq!(res.focus_window, Some(win1));
         assert_eq!(res.raise_windows, vec![win1]);
         assert_eq!(mgr.focused_window, Some(win1));
+
+        // Now test 3 windows in BSP mode: removing win3 -> win2 expands
+        let mut mgr = LayoutManager::new_for_test();
+        mgr.split_mode = SplitMode::Bsp;
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 3)));
+        let win3 = WindowId::new(pid, 3);
+        _ = mgr.handle_event(WindowFocused(vec![space], win3));
+        let res = mgr.handle_event(WindowRemoved(win3));
+        assert_eq!(res.focus_window, Some(win2));
+
+        // Test 3 windows in BSP mode: removing win2 -> win3 expands
+        let mut mgr = LayoutManager::new_for_test();
+        mgr.split_mode = SplitMode::Bsp;
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 3)));
+        _ = mgr.handle_event(WindowFocused(vec![space], win2));
+        let res = mgr.handle_event(WindowRemoved(win2));
+        assert_eq!(res.focus_window, Some(win3));
+
+        // Now test 4 windows in BSP mode: removing win4 -> win1 expands
+        let mut mgr = LayoutManager::new_for_test();
+        mgr.split_mode = SplitMode::Bsp;
+        _ = mgr.handle_event(SpaceExposed(space, screen.size));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 3)));
+        _ = mgr.handle_event(WindowFocused(vec![space], win1));
+        _ = mgr.handle_event(WindowsOnScreenUpdated(space, pid, make_windows(pid, 4)));
+        let win4 = WindowId::new(pid, 4);
+        _ = mgr.handle_event(WindowFocused(vec![space], win4));
+        let res = mgr.handle_event(WindowRemoved(win4));
+        assert_eq!(res.focus_window, Some(win1));
     }
 }
